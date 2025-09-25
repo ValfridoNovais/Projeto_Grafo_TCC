@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+
+# Virtual envs
+venv*/
+.venv/
+env/
+
+# Neo4j volumes
+neo4j/data/
+neo4j/logs/
+neo4j/plugins/
+
+# Arquivos de export/import grandes
+*.dump
+*.graphml
+*.csv
+*.xlsx
+exports/
+data/*.xlsx
+data/*.csv
+
+# Configurações locais
+.env
+
+
+docker/.env
+web/config.js

@@ -1,0 +1,134 @@
+
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <title>Grafo REDS · Neovis</title>
+  <style>
+    body { margin:0; font-family:system-ui, sans-serif; }
+    #toolbar { padding:10px; border-bottom:1px solid #eee; display:flex; gap:8px; align-items:center; }
+    #viz { width:100vw; height: calc(100vh - 56px); }
+    input, select, button { padding:6px 10px; }
+  </style>
+  <!-- libs (CDN) -->
+  <script src="https://unpkg.com/neovis.js@2.0.2/dist/neovis.js"></script>
+</head>
+<body>
+  <div id="toolbar">
+    <select id="preset">
+      <option value="overview">Overview</option>
+      <option value="por-natureza">Ocorrências x Natureza</option>
+      <option value="por-bairro">Ocorrências x Bairro/Município</option>
+      <option value="por-tempo">Ocorrências x Tempo</option>
+    </select>
+    <input id="limit" type="number" value="500" min="50" step="50" />
+    <button id="run">Atualizar</button>
+    <button id="png">Exportar PNG</button>
+  </div>
+  <div id="viz"></div>
+
+  <script>
+    let viz;
+
+    const LABELS = {
+      Ocorrencia:  { caption: "caption", size: "prisao", font: { multi: true } },
+      NaturezaPrincipal: { caption: "caption" },
+      NaturezaSecundaria:{ caption: "caption" },
+      Bairro:      { caption: "caption" },
+      Municipio:   { caption: "caption" },
+      Tempo:       { caption: "mes_desc" },
+      Causa:       { caption: "caption" },
+      Meio:        { caption: "descricao" },
+      UnidadeN5:   { caption: "nome" },
+      UnidadeN6:   { caption: "caption" }
+    };
+
+    const RELS = {
+      OCORRE_EM: {}, FICA_EM: {}, CLASSIFICADA_COM: {},
+      RELACIONA_SE: {}, NO_TEMPO: {}, CAUSA: {}, MEIO: {},
+      AREA_N5: {}, AREA_N6: {}, PERTENCE_A: {}, SETOR: {}, SUBSETOR: {}
+    };
+
+    function cypherPreset(preset, limit) {
+      switch (preset) {
+        case "por-natureza":
+          return `
+            MATCH p=(o:Ocorrencia)-[:CLASSIFICADA_COM]->(n:NaturezaPrincipal)
+            WITH p LIMIT ${limit} RETURN p
+          `;
+        case "por-bairro":
+          return `
+            MATCH p=(o:Ocorrencia)-[:OCORRE_EM]->(b:Bairro)-[:FICA_EM]->(m:Municipio)
+            WITH p LIMIT ${limit} RETURN p
+          `;
+        case "por-tempo":
+          return `
+            MATCH p=(o:Ocorrencia)-[:NO_TEMPO]->(t:Tempo)
+            WITH p LIMIT ${limit} RETURN p
+          `;
+        default:
+          return `
+            MATCH p=(o:Ocorrencia)-[r]-()
+            WITH p LIMIT ${limit} RETURN p
+          `;
+      }
+    }
+
+
+    function render(preset="overview", limit=500) {
+      const config = {
+        container_id: "viz",
+        server_url: "bolt://localhost:7687",   // se estiver no navegador local
+        server_user: "neo4j",
+        server_password: "senha-forte",
+        database: "neo4j",                     // <-- adicione
+        encrypted: "ENCRYPTION_OFF", 
+        arrows: true,
+        hierarchical: false,
+        physics: {
+          enabled: true,
+          stabilization: { iterations: 400 },
+          solver: "forceAtlas2Based",
+          forceAtlas2Based: { gravitationalConstant: -50, centralGravity: 0.005, springLength: 120, springConstant: 0.12 }
+        },
+        labels: LABELS,
+        relationships: RELS,
+        initial_cypher: cypherPreset(preset, limit),
+        visConfig: {
+          nodes: {
+            shape: "dot",
+            scaling: { min: 5, max: 40 }, // tamanho ∝ propriedade 'size'
+            font: { size: 16, face: "Inter", multi: "md" }
+          },
+          edges: {
+            arrows: { to: { enabled: true, scaleFactor: 0.6 } },
+            smooth: { type: "dynamic" }
+          },
+          interaction: { hover: true, tooltipDelay: 120, hideEdgesOnDrag: false }
+        }
+      };
+      viz = new NeoVis.default(config);
+      viz.render();
+    }
+
+    // UI
+    document.getElementById("run").onclick = () => {
+      const p = document.getElementById("preset").value;
+      const l = parseInt(document.getElementById("limit").value || "500", 10);
+      render(p, l);
+    };
+
+    document.getElementById("png").onclick = () => {
+      // baixa o canvas como PNG
+      const c = document.querySelector("#viz canvas");
+      const a = document.createElement("a");
+      a.href = c.toDataURL("image/png");
+      a.download = "grafo.png";
+      a.click();
+    };
+
+    // primeira renderização
+    render();
+  </script>
+</body>
+</html>
