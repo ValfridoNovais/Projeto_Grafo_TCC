@@ -35,6 +35,9 @@ services:
       - "8080:80"      # app web em http://<VPS>:8080
     depends_on:
       - neo4j
+    volumes:
+      # monta a pasta local web inteira dentro do container nginx
+      - ../web:/usr/share/nginx/html:ro
 
   # opcional: dashboards prontos
   neodash:

@@ -1,134 +1,309 @@
-
 <!doctype html>
 <html lang="pt-br">
 <head>
   <meta charset="utf-8" />
   <title>Grafo REDS · Neovis</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { margin:0; font-family:system-ui, sans-serif; }
-    #toolbar { padding:10px; border-bottom:1px solid #eee; display:flex; gap:8px; align-items:center; }
-    #viz { width:100vw; height: calc(100vh - 56px); }
-    input, select, button { padding:6px 10px; }
+    :root {
+      --gap: 10px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; color:#0f172a; }
+    #toolbar {
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      gap: var(--gap);
+      align-items: center;
+      padding: 10px;
+      border-bottom: 1px solid #e5e7eb;
+      background: #f8fafc;
+    }
+    .row { display:flex; flex-wrap: wrap; gap: var(--gap); align-items: center; }
+    .group { display:flex; flex-wrap: wrap; gap: var(--gap); align-items:center; }
+    .group label { font-size: 12px; color:#334155; }
+    input[type="text"], input[type="number"], input[type="password"], select {
+      height: 34px; padding: 6px 10px; border:1px solid #cbd5e1; border-radius: 8px; background: white;
+    }
+    input::placeholder { color:#94a3b8 }
+    button {
+      height: 34px; padding: 0 12px; border:1px solid #0ea5e9; color:#0b5; border-radius: 999px;
+      background: #0ea5e9; color:white; font-weight:600; cursor:pointer;
+    }
+    button.secondary { background: white; color:#0ea5e9; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    #viz { width: 100vw; height: calc(100vh - 66px); }
+    details summary { cursor: pointer; user-select:none; }
   </style>
   <!-- libs (CDN) -->
   <script src="https://unpkg.com/neovis.js@2.0.2/dist/neovis.js"></script>
+  <script src="https://unpkg.com/neo4j-driver-lite@5.23.0/lib/browser/neo4j-web.min.js"></script>
 </head>
 <body>
   <div id="toolbar">
-    <select id="preset">
-      <option value="overview">Overview</option>
-      <option value="por-natureza">Ocorrências x Natureza</option>
-      <option value="por-bairro">Ocorrências x Bairro/Município</option>
-      <option value="por-tempo">Ocorrências x Tempo</option>
-    </select>
-    <input id="limit" type="number" value="500" min="50" step="50" />
-    <button id="run">Atualizar</button>
-    <button id="png">Exportar PNG</button>
+    <div class="row">
+      <details>
+        <summary>Conexão</summary>
+        <div class="group" style="margin-top:8px">
+          <input id="host" type="text" placeholder="URI Neo4j (ex.: bolt://localhost:7687)" size="28">
+          <input id="user" type="text" placeholder="Usuário">
+          <input id="pass" type="password" placeholder="Senha">
+          <button id="saveConn" class="secondary" title="Salva no navegador">Salvar</button>
+        </div>
+      </details>
+      <div class="group">
+        <select id="f_ano" style="width:140px"><option value="">Ano (todos)</option></select>
+        <select id="f_municipio" style="width:220px"><option value="">Município (todos)</option></select>
+        <select id="f_natureza" style="width:260px"><option value="">Natureza (todas)</option></select>
+        <input id="f_busca" type="text" placeholder="Busca livre (nome, natureza, etc.)" size="28">
+        <label>Limite
+          <input id="f_limit" type="number" value="200" min="10" max="5000" style="width:90px">
+        </label>
+      </div>
+    </div>
+    <div class="row">
+      <button id="aplicar">Aplicar filtros</button>
+      <button id="reset" class="secondary">Limpar</button>
+      <button id="png" class="secondary">Exportar PNG</button>
+    </div>
   </div>
+
   <div id="viz"></div>
 
   <script>
+    // ======== Helpers ========
+    const $ = (sel) => document.querySelector(sel);
+    const get = (id) => document.getElementById(id);
+
+    function saveLocal(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+    function loadLocal(k, def=null) { try { return JSON.parse(localStorage.getItem(k)) ?? def; } catch { return def; } }
+    function sanitize(v) { return (v??'').toString().replaceAll("'", "\\'"); }
+
+    // ======== Estado (conexão + filtros) ========
+    const state = {
+      host: loadLocal('neo4j_host', 'bolt://localhost:7687'),
+      user: loadLocal('neo4j_user', 'neo4j'),
+      pass: loadLocal('neo4j_pass', ''),
+      filtros: loadLocal('filtros', { ano: '', municipio: '', natureza: '', busca: '', limit: 200 })
+    };
+
+    // Monta UI inicial
+    get('host').value = state.host; get('user').value = state.user; get('pass').value = state.pass;
+    // selects serão populados via banco
+    get('f_limit').value = state.filtros.limit ?? 200;
+
+    // Persistência
+    get('saveConn').onclick = () => {
+      state.host = get('host').value.trim();
+      state.user = get('user').value.trim();
+      state.pass = get('pass').value;
+      saveLocal('neo4j_host', state.host);
+      saveLocal('neo4j_user', state.user);
+      saveLocal('neo4j_pass', state.pass);
+      alert('Conexão salva neste navegador.');
+    };
+
+    get('reset').onclick = () => {
+      get('f_ano').value = '';
+      get('f_municipio').value = '';
+      get('f_natureza').value = '';
+      get('f_busca').value = '';
+      get('f_limit').value = 200;
+      applyFilters();
+    };
+
+    // ======== Neovis setup ========
     let viz;
 
-    const LABELS = {
-      Ocorrencia:  { caption: "caption", size: "prisao", font: { multi: true } },
-      NaturezaPrincipal: { caption: "caption" },
-      NaturezaSecundaria:{ caption: "caption" },
-      Bairro:      { caption: "caption" },
-      Municipio:   { caption: "caption" },
-      Tempo:       { caption: "mes_desc" },
-      Causa:       { caption: "caption" },
-      Meio:        { caption: "descricao" },
-      UnidadeN5:   { caption: "nome" },
-      UnidadeN6:   { caption: "caption" }
-    };
-
-    const RELS = {
-      OCORRE_EM: {}, FICA_EM: {}, CLASSIFICADA_COM: {},
-      RELACIONA_SE: {}, NO_TEMPO: {}, CAUSA: {}, MEIO: {},
-      AREA_N5: {}, AREA_N6: {}, PERTENCE_A: {}, SETOR: {}, SUBSETOR: {}
-    };
-
-    function cypherPreset(preset, limit) {
-      switch (preset) {
-        case "por-natureza":
-          return `
-            MATCH p=(o:Ocorrencia)-[:CLASSIFICADA_COM]->(n:NaturezaPrincipal)
-            WITH p LIMIT ${limit} RETURN p
-          `;
-        case "por-bairro":
-          return `
-            MATCH p=(o:Ocorrencia)-[:OCORRE_EM]->(b:Bairro)-[:FICA_EM]->(m:Municipio)
-            WITH p LIMIT ${limit} RETURN p
-          `;
-        case "por-tempo":
-          return `
-            MATCH p=(o:Ocorrencia)-[:NO_TEMPO]->(t:Tempo)
-            WITH p LIMIT ${limit} RETURN p
-          `;
-        default:
-          return `
-            MATCH p=(o:Ocorrencia)-[r]-()
-            WITH p LIMIT ${limit} RETURN p
-          `;
-      }
-    }
-
-
-    function render(preset="overview", limit=500) {
-      const config = {
-        container_id: "viz",
-        server_url: "bolt://localhost:7687",   // se estiver no navegador local
-        server_user: "neo4j",
-        server_password: "senha-forte",
-        database: "neo4j",                     // <-- adicione
-        encrypted: "ENCRYPTION_OFF", 
-        arrows: true,
-        hierarchical: false,
-        physics: {
-          enabled: true,
-          stabilization: { iterations: 400 },
-          solver: "forceAtlas2Based",
-          forceAtlas2Based: { gravitationalConstant: -50, centralGravity: 0.005, springLength: 120, springConstant: 0.12 }
+    function buildConfig() {
+      return {
+        containerId: 'viz',
+        neo4j: {
+          serverUrl: state.host,
+          serverUser: state.user,
+          serverPassword: state.pass
         },
-        labels: LABELS,
-        relationships: RELS,
-        initial_cypher: cypherPreset(preset, limit),
         visConfig: {
-          nodes: {
-            shape: "dot",
-            scaling: { min: 5, max: 40 }, // tamanho ∝ propriedade 'size'
-            font: { size: 16, face: "Inter", multi: "md" }
+          nodes: { shape: 'dot', size: 14, font: { size: 14, color: '#111827', strokeWidth: 3, strokeColor: '#fff' } },
+          edges: { arrows: { to: { enabled: true, scaleFactor: 0.7 } }, smooth: { type: 'continuous' }, font: { size: 12, strokeWidth: 0, align: 'top' } },
+          physics: { stabilization: true },
+          interaction: { hover: true },
+          groups: {
+            Ocorrencia: { color: { background: '#0ea5e9', border: '#0284c7' } },
+            NaturezaPrincipal: { color: { background: '#f59e0b', border: '#d97706' } },
+            NaturezaSecundaria: { color: { background: '#fbbf24', border: '#f59e0b' } },
+            Bairro: { color: { background: '#10b981', border: '#059669' } },
+            Municipio: { color: { background: '#34d399', border: '#10b981' } },
+            Tempo: { color: { background: '#a78bfa', border: '#8b5cf6' } },
+            Setor: { color: { background: '#f472b6', border: '#ec4899' } },
+            SubSetor: { color: { background: '#fb7185', border: '#f43f5e' } }
+          }
+        },
+          edges: { arrows: { to: { enabled: true } }, smooth: { type: 'continuous' } },
+          physics: { stabilization: true }
+        },
+        labels: {
+          Ocorrencia: {
+            label: 'numero',
+            titleProperties: ['numero'],
+            group: 'Ocorrencia'
           },
-          edges: {
-            arrows: { to: { enabled: true, scaleFactor: 0.6 } },
-            smooth: { type: "dynamic" }
+          NaturezaPrincipal: {
+            label: 'nome',
+            titleProperties: ['nome'],
+            group: 'NaturezaPrincipal'
           },
-          interaction: { hover: true, tooltipDelay: 120, hideEdgesOnDrag: false }
+          NaturezaSecundaria: {
+            label: 'nome',
+            titleProperties: ['nome'],
+            group: 'NaturezaSecundaria'
+          },
+          Bairro: {
+            label: 'nome',
+            titleProperties: ['nome'],
+            group: 'Bairro'
+          },
+          Municipio: {
+            label: 'nome',
+            titleProperties: ['nome'],
+            group: 'Municipio'
+          },
+          Tempo: {
+            label: 'ano',
+            titleProperties: ['ano'],
+            group: 'Tempo'
+          },
+          Setor: { label: 'nome', titleProperties: ['nome'], group: 'Setor' },
+          SubSetor: { label: 'nome', titleProperties: ['nome'], group: 'SubSetor' }
+        },
+        relationships: {
+          CLASSIFICADA_COM: { caption: true },
+          FICA_EM: { caption: true },
+          PERTENCE_A: { caption: true },
+          NO_TEMPO: { caption: true },
+          SETOR: { caption: true },
+          SUBSETOR: { caption: true },
+          RELACIONA_SE: { caption: true },
+          AREA_N5: { caption: true }
         }
       };
-      viz = new NeoVis.default(config);
-      viz.render();
     }
 
-    // UI
-    document.getElementById("run").onclick = () => {
-      const p = document.getElementById("preset").value;
-      const l = parseInt(document.getElementById("limit").value || "500", 10);
-      render(p, l);
-    };
+    function buildCypher() {
+      const ano = get('f_ano').value.trim();
+      const municipio = get('f_municipio').value.trim();
+      const natureza = get('f_natureza').value.trim();
+      const busca = get('f_busca').value.trim();
+      const limit = Math.max(10, Number(get('f_limit').value) || 200);
 
-    document.getElementById("png").onclick = () => {
-      // baixa o canvas como PNG
-      const c = document.querySelector("#viz canvas");
-      const a = document.createElement("a");
-      a.href = c.toDataURL("image/png");
-      a.download = "grafo.png";
+      // salva filtros
+      state.filtros = { ano, municipio, natureza, busca, limit };
+      saveLocal('filtros', state.filtros);
+
+      // Filtros flexíveis baseados no seu modelo (Ocorrencia ligada a Tempo, Bairro->Municipio e Naturezas)
+      const where = [];
+      if (ano) where.push(`toInteger(coalesce(t.ano,0)) = ${Number(ano)}`);
+      if (municipio) where.push(`toLower(coalesce(mun.nome,'')) CONTAINS '${sanitize(municipio.toLowerCase())}'`);
+      if (natureza) where.push(`toLower(coalesce(np.nome,'')) CONTAINS '${sanitize(natureza.toLowerCase())}' OR toLower(coalesce(ns.nome,'')) CONTAINS '${sanitize(natureza.toLowerCase())}'`);
+      if (busca) where.push(`(
+        toLower(coalesce(np.nome,'')) CONTAINS '${sanitize(busca.toLowerCase())}' OR
+        toLower(coalesce(ns.nome,'')) CONTAINS '${sanitize(busca.toLowerCase())}' OR
+        toLower(coalesce(b.nome,''))  CONTAINS '${sanitize(busca.toLowerCase())}' OR
+        toLower(coalesce(mun.nome,'')) CONTAINS '${sanitize(busca.toLowerCase())}'
+      )`);
+      const whereStr = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+      // A consulta abaixo retorna nós e RELACIONAMENTOS explicitamente para o Neovis desenhar as arestas
+      const cypher = `
+        MATCH (o:Ocorrencia)
+        OPTIONAL MATCH (o)-[:NO_TEMPO]->(t:Tempo)
+        OPTIONAL MATCH (o)-[:FICA_EM]->(b:Bairro)-[:PERTENCE_A]->(mun:Municipio)
+        OPTIONAL MATCH (o)-[:CLASSIFICADA_COM]->(np:NaturezaPrincipal)
+        OPTIONAL MATCH (o)-[:CLASSIFICADA_COM]->(ns:NaturezaSecundaria)
+        ${whereStr}
+        WITH DISTINCT o, t, b, mun, np, ns
+        OPTIONAL MATCH (o)-[r1:CLASSIFICADA_COM]->(np)
+        OPTIONAL MATCH (o)-[r2:CLASSIFICADA_COM]->(ns)
+        OPTIONAL MATCH (o)-[r3:FICA_EM]->(b)
+        OPTIONAL MATCH (b)-[r4:PERTENCE_A]->(mun)
+        OPTIONAL MATCH (o)-[r5:NO_TEMPO]->(t)
+        RETURN o, r1, np, r2, ns, r3, b, r4, mun, r5, t
+        LIMIT ${limit}
+      `;
+      return cypher;
+    }
+
+    function ensureViz() {
+      if (!viz) {
+        try {
+          viz = new NeoVis.default(buildConfig());
+        } catch(e) {
+          console.error('Falha ao criar NeoVis', e);
+          alert('Não consegui inicializar o Neovis. Verifique a lib no CDN.');
+        }
+      }
+      return viz;
+    }
+
+    function applyFilters() {
+      const cypher = buildCypher();
+      ensureViz().renderWithCypher(cypher);
+    }
+
+    get('aplicar').onclick = applyFilters;
+
+    // === Popular selects a partir do banco ===
+    async function populateFilters() {
+      const host = get('host').value.trim();
+      const user = get('user').value.trim();
+      const pass = get('pass').value;
+      if (!host || !user) return;
+      const driver = neo4j.driver(host, neo4j.auth.basic(user, pass));
+      const session = driver.session();
+      try {
+        // Anos
+        let res = await session.run('MATCH (t:Tempo) RETURN DISTINCT t.ano AS v ORDER BY v DESC');
+        setOptions('f_ano', res.records.map(r => r.get('v')));
+        // Municípios
+        res = await session.run('MATCH (m:Municipio) RETURN DISTINCT m.nome AS v ORDER BY v');
+        setOptions('f_municipio', res.records.map(r => r.get('v')));
+        // Naturezas (unir principal/secundaria)
+        res = await session.run('MATCH (n:NaturezaPrincipal) RETURN DISTINCT n.nome AS v UNION MATCH (n:NaturezaSecundaria) RETURN DISTINCT n.nome AS v ORDER BY v');
+        setOptions('f_natureza', res.records.map(r => r.get('v')));
+      } catch (e) { console.error('populateFilters', e); }
+      finally { await session.close(); await driver.close(); }
+    }
+
+    function setOptions(id, values) {
+      const sel = get(id);
+      const first = sel.querySelector('option');
+      const header = first ? first.outerHTML : '<option value="">Todos</option>';
+      sel.innerHTML = header + values.map(v => `<option>${v}</option>`).join('');
+      // restaura seleção salva se existir
+      const key = id.replace('f_','');
+      const current = state.filtros[key];
+      if (current) sel.value = current;
+    }
+
+    // Quando salvar conexão, já carrega listas
+    get('saveConn').addEventListener('click', populateFilters);
+
+    // Ao abrir a página, tenta popular (se já houver credenciais salvas)
+    populateFilters();
+
+    // Exportar PNG
+    get('png').onclick = () => {
+      const c = document.querySelector('#viz canvas');
+      if (!c) return alert('Renderize algo antes de exportar.');
+      const a = document.createElement('a');
+      a.href = c.toDataURL('image/png');
+      a.download = 'grafo.png';
       a.click();
     };
 
-    // primeira renderização
-    render();
+    // Primeira renderização
+    applyFilters();
   </script>
 </body>
 </html>
